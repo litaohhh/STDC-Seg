@@ -454,7 +454,7 @@ lr_start：表示模型训练过程中的初始学习率，通常需要根据具
      loss_boundery_bce = []
      # 边界 Dice 损失
      loss_boundery_dice = []
-     # 记录了整个训练开始的时间
+     # 获取到的时间戳值，记录整个训练开始的时间
      st = glob_st = time.time()
      # 初始化一个数据集迭代器 diter
      diter = iter(dl)
@@ -559,14 +559,23 @@ lr_start：表示模型训练过程中的初始学习率，通常需要根据具
          
          
         ## print training log message
-        if (it+1)%msg_iter==0:
+        
+        # msg_iter=50，it=0，从0开始到49，每50一轮
+        if (it+1) % msg_iter==0:
+            # 平均损失
             loss_avg = sum(loss_avg) / len(loss_avg)
             lr = optim.lr
+            # 获取到的时间戳值，记录训练的结束时间
             ed = time.time()
+            # t_intv已经训练的时间
             t_intv, glob_t_intv = ed - st, ed - glob_st
+            # 计算后面训练所需的时间
             eta = int((max_iter - it) * (glob_t_intv / it))
+            # 以秒为单位的时间差 eta 转换为以时分秒格式表示的字符串
+            # datetime.timedelta 是 Python 内置模块，用于表示时间间隔或持续时间
             eta = str(datetime.timedelta(seconds=eta))
-
+            
+            # 平均损失
             loss_boundery_bce_avg = sum(loss_boundery_bce) / len(loss_boundery_bce)
             loss_boundery_dice_avg = sum(loss_boundery_dice) / len(loss_boundery_dice)
             msg = ', '.join([
@@ -589,31 +598,78 @@ lr_start：表示模型训练过程中的初始学习率，通常需要根据具
             )
             
             logger.info(msg)
+            # 损失清空
             loss_avg = []
             loss_boundery_bce = []
             loss_boundery_dice = []
+            # 时间继上
             st = ed
          
          
+        # print(boundary_loss_func.get_params())
+        # 每隔save_iter_sep保存一次模型参数
+        if (it+1) % save_iter_sep==0:
+        # and it != 0:
+            
+            ## model
+            logger.info('evaluating the model ...')
+            logger.info('setup and restore model')
+            # 用于将神经网络模型设置为评估模式的方法。在评估模式下，模型会禁用部分操作，
+            # 例如 dropout 和批归一化层，这些操作通常只在训练时使用。这可以确保模型针对给定输入生成一致和确定性的输出，这在评估模型性能或对新数据进行预测时非常重要
+            net.eval()
 
+            # evaluator
+            logger.info('compute the mIOU')
+            # no_grad() 上下文管理器，它可以临时禁用梯度计算
+            with torch.no_grad():
+            # single_scale1 和 single_scale2 分别进行模型评估，并计算了两种不同比例的图像尺度下的 mIOU 指标值
+                single_scale1 = MscEvalV0()
+                mIOU50 = single_scale1(net, dlval, n_classes)
 
+                single_scale2= MscEvalV0(scale=0.75)
+                mIOU75 = single_scale2(net, dlval, n_classes)
+                
+            #  round() 函数将变量 mIOU75 的值四舍五入到小数点后四位
+            save_pth = osp.join(save_pth_path, 'model_iter{}_mIOU50_{}_mIOU75_{}.pth'
+            .format(it+1, str(round(mIOU50,4)), str(round(mIOU75,4))))
+            
+            state = net.module.state_dict() if hasattr(net, 'module') else net.state_dict()
+            if dist.get_rank()==0: 
+                torch.save(state, save_pth)
 
+            logger.info('training iteration {}, model saved to: {}'.format(it+1, save_pth))
 
+            if mIOU50 > maxmIOU50:
+                maxmIOU50 = mIOU50
+                save_pth = osp.join(save_pth_path, 'model_maxmIOU50.pth'.format(it+1))
+                state = net.module.state_dict() if hasattr(net, 'module') else net.state_dict()
+                if dist.get_rank()==0: 
+                    torch.save(state, save_pth)
+                    
+                logger.info('max mIOU model saved to: {}'.format(save_pth))
+            
+            if mIOU75 > maxmIOU75:
+                maxmIOU75 = mIOU75
+                save_pth = osp.join(save_pth_path, 'model_maxmIOU75.pth'.format(it+1))
+                state = net.module.state_dict() if hasattr(net, 'module') else net.state_dict()
+                if dist.get_rank()==0: torch.save(state, save_pth)
+                logger.info('max mIOU model saved to: {}'.format(save_pth))
+            
+            logger.info('mIOU50 is: {}, mIOU75 is: {}'.format(mIOU50, mIOU75))
+            logger.info('maxmIOU50 is: {}, maxmIOU75 is: {}.'.format(maxmIOU50, maxmIOU75))
 
+            net.train() 
+            
+            
+    ## dump the final model
+    save_pth = osp.join(save_pth_path, 'model_final.pth')
+    net.cpu()
+    state = net.module.state_dict() if hasattr(net, 'module') else net.state_dict()
+    if dist.get_rank()==0: torch.save(state, save_pth)
+    logger.info('training done, model saved to: {}'.format(save_pth))
+    print('epoch: ', epoch)
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+if __name__ == "__main__":
+    train()
 
 
