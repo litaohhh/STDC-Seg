@@ -137,20 +137,26 @@ def parse_args():
             type = int,
             default = -1,
             )
-            # train个数8
+            # train进程个数8
     parse.add_argument(
             '--n_workers_train',
             dest = 'n_workers_train',
             type = int,
             default = 8,
             )
-            # val个数8
+            # val进程个数0
     parse.add_argument(
             '--n_workers_val',
             dest = 'n_workers_val',
             type = int,
             default = 0,
             )
+            # add_argument() 方法：用于向解析器中添加参数；
+            # --n_workers_val：命令行参数名称，表示验证集数据加载时使用的进程数；
+            # dest 参数：用于指定将参数值存储到哪个属性中；
+            # type 参数：用于指定参数值的类型，此处使用了 int 类型，将参数值转换为整数类型；
+            # default 参数：用于指定当未提供该参数时，应当使用的默认值。
+            
             # 每个gpu分8个图像
     parse.add_argument(
             '--n_img_per_gpu',
@@ -212,6 +218,7 @@ def parse_args():
             type = str2bool,
             default = False,
             )
+            # use_boundary_16、se_boundary_8、use_boundary_4、use_boundary_2 等变量则与具体的图像分割模型实现相关，表示是否使用不同大小的边界（如 2、4、8、16）作为训练数据。
     parse.add_argument(
             '--use_boundary_2',
             dest = 'use_boundary_2',
@@ -268,8 +275,9 @@ def train():
                # world_size = torch.cuda.device_count()：指定了进程组的总大小为当前 CUDA 设备的数量，即每个设备对应一个进程。
                # rank=args.local_rank：指定当前进程在进程组中的编号，该值从命令行参数 --local_rank 中获取。
   # 第一个参数指定进程组的后端类型，例如 "gloo" 表示使用 Gloo 后端，还可以选择使用 NCCL 或 MPI 等其他后端。
-  # 第二个参数 rank 表示当前进程在进程组中的编号（从 0 开始），第三个参数 world_size 表示进程组中总共有多少个进程。                
+  # 第二个参数 rank 表示当前进程在进程组中的编号（从 0 开始），第三个参数 world_size 表示进程组中总共有多少个进程。  
   
+        #  是一个自定义的函数，它用于设置日志记录器，在指定路径下生成日志文件
         setup_logger(args.respath)
         
         ## dataset
@@ -282,12 +290,11 @@ def train():
         se_boundary_8 = args.use_boundary_8
         use_boundary_4 = args.use_boundary_4
         use_boundary_2 = args.use_boundary_2
-    
-        mode = args.mode
-        cropsize = [1024, 512]
-        randomscale = (0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0, 1.125, 1.25, 1.375, 1.5)
-                
-   
+
+   # dist在哪，是什么
+   # 用于判断当前进程是否为分布式训练中的主进程（rank=0）
+   # dist 表示 PyTorch 中用于实现分布式训练的模块，其中包含了用于获取进程 rank 号的方法；
+   # get_rank() 方法：返回当前进程的 rank 号，其中主进程的 rank 号默认为 0；
     if dist.get_rank()==0: 
         logger.info('n_workers_train: {}'.format(n_workers_train))
         logger.info('n_workers_val: {}'.format(n_workers_val))
@@ -295,8 +302,103 @@ def train():
         logger.info('use_boundary_4: {}'.format(use_boundary_4))
         logger.info('use_boundary_8: {}'.format(use_boundary_8))
         logger.info('use_boundary_16: {}'.format(use_boundary_16))
-        logger.info('mode: {}'.format(args.mode))             
-               
+        logger.info('mode: {}'.format(args.mode))
+        
+        
+   # mode 变量表示数据增强的模式，该模式决定了使用哪种数据增强方式；
+   # cropsize 是一个列表，表示图像随机裁剪后的大小，具体来说，它包含了两个元素，分别表示裁剪后的长和宽；
+   # 而 randomscale 则是一个由多个浮点数构成的元组，表示图像的尺度变换系数，用于在训练时对图像进行缩放以此实现数据增强。
+   mode = args.mode
+   cropsize = [1024, 512]
+   randomscale = (0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0, 1.125, 1.25, 1.375, 1.5)
+   
+    # 对数据做数据增强，保存在dspth路径中
+    ds = CityScapes(dspth, cropsize=cropsize, mode=mode, randomscale=randomscale)
+    # 创建一个分布式数据采样器（DistributedSampler），以便在分布式训练中对数据集进行划分和采样
+    # 得出一个数据样本，类似于split
+    sampler = torch.utils.data.distributed.DistributedSampler(ds)
+    # 创建一个 PyTorch 中的数据加载器（DataLoader），以便在训练过程中对数据集进行批量读取和处理
+    dl = DataLoader(ds,
+                    batch_size = n_img_per_gpu,
+                    shuffle = False,
+                    sampler = sampler,
+                    num_workers = n_workers_train,
+                    pin_memory = False,
+                    drop_last = True)
+    # pin_memory：表示是否将内存锁定到 RAM 中。如果为 True，则会将数据从主机端内存锁定到 RAM 中，可以加速数据传输，但会占用更多的系统内存；
+    # drop_last：表示是否丢弃最后一组大小小于 batch_size 的数据，如果为 True，则表示最后一组大小小于 batch_size 的数据不进行训练，否则会进行处理。
+    #  shuffle 参数表示是否对数据集进行随机打乱。如果该参数为 True，则在每个 epoch 开始时，数据加载器会将数据集中的所有样本打乱重新排列；如果该参数为 False，则不对数据集进行打乱操作，按照原始顺序进行训练。
+    # 一般来说，在训练过程中对数据进行随机打乱可以增加模型的鲁棒性和泛化能力，避免网络过度拟合训练数据，提高网络的训练效果。但是，对于某些特定的任务或数据集，也可能需要保持数据集的原始顺序进行训练
+    
+                    
+    # exit(0)
+    # mode='val'，上次有赋值，这次没有定义
+    # 这次数据也放在这里，不会冲突吧，这次应该是用上面的数据进行测试，名叫'val'
+    dsval = CityScapes(dspth, mode='val', randomscale=randomscale)
+    sampler_val = torch.utils.data.distributed.DistributedSampler(dsval)
+    dlval = DataLoader(dsval,
+                    batch_size = 2,
+                    shuffle = False,
+                    sampler = sampler_val,
+                    num_workers = n_workers_val,
+                    drop_last = False)
+    
+    
+    ## model
+    ignore_idx = 255
+    net = BiSeNet(backbone=args.backbone, n_classes=n_classes, pretrain_model=args.pretrain_path, 
+    use_boundary_2=use_boundary_2, use_boundary_4=use_boundary_4, use_boundary_8=use_boundary_8, 
+    use_boundary_16=use_boundary_16, use_conv_last=args.use_conv_last)
+    
+    # args.ckpt 表示预训练模型的路径
+    if not args.ckpt is None:
+    # 从 GPU 加载的预训练模型参数转换到 CPU 上，以便后续的训练和推理
+    # torch.load加载模型参数的函数，可以将保存在文件中的模型参数加载到指定的网络结构中
+        net.load_state_dict(torch.load(args.ckpt, map_location='cpu'))
+        
+    # 将模型移动到 GPU 上进行训练
+    net.cuda()
+    # 设置模型为训练模式，以便在后续的训练过程中进行反向传播和参数更新
+    net.train()
+    # PyTorch 中用于实现分布式计算的模块，可以对模型进行多进程数据并行处理，从而提高训练速度和效率；
+    net = nn.parallel.DistributedDataParallel(net,
+            device_ids = [args.local_rank, ],
+            output_device = args.local_rank,
+            find_unused_parameters=True
+            )
+    # 指定哪些设备用于训练，此处使用了 [args.local_rank, ]，表示仅使用当前进程所在的 GPU 设备进行训练
+    # 指定输出结果的设备，此处也使用了 args.local_rank，表示将输出结果返回到当前进程所在的 GPU 设备上
+    # find_unused_parameters=True 参数：表示开启自动发现未使用的参数（Unused Parameters），即当某个进程的计算已经完成时，无需等待其他进程，直接跳过计算未使用的参数，从而加快训练速度。
+              
+         
+    # 分数阈值
+    score_thres = 0.7
+    # 最小个数为  每个gpu上的图象数量 * 图像裁剪后的长 * 图像裁剪后的宽  除以16
+    n_min = n_img_per_gpu * cropsize[0] * cropsize[1]//16
+    
+    # 创建三个损失函数对象，分别用于计算图像语义分割任务中的不同尺度下的损失值
+    criteria_p = OhemCELoss(thresh=score_thres, n_min=n_min, ignore_lb=ignore_idx)
+    criteria_16 = OhemCELoss(thresh=score_thres, n_min=n_min, ignore_lb=ignore_idx)
+    criteria_32 = OhemCELoss(thresh=score_thres, n_min=n_min, ignore_lb=ignore_idx)
+    # OhemCELoss：是一个自定义的 PyTorch 损失函数类，用于计算图像语义分割任务中的损失值。该函数的具体实现方式可以根据需求进行修改；
+    # thresh 参数：表示损失函数中用于过滤掉一些误分类样本的阈值，即当某个像素点预测的概率小于这个阈值时，将其视为背景像素，不参与损失值的计算；
+    # n_min 参数：表示损失函数中用于设置最小保留样本数的阈值，即在每个 mini-batch 中至少保留 n_min 个正样本和 n_min 个负样本用于损失值的计算；
+    # ignore_lb 参数：表示忽略掉某些指定的标签类别，不参与损失值的计算；
+    # criteria_p、criteria_16 和 criteria_32：是三个不同尺度下的损失函数对象，分别对应着全分辨率（full resolution）、1/16 分辨率和 1/32 分辨率下的损失值计算。
+    
+    boundary_loss_func = DetailAggregateLoss()
+    
+    ## optimizer
+    maxmIOU50 = 0.
+    maxmIOU75 = 0.
+    momentum = 0.9
+    weight_decay = 5e-4
+    lr_start = 1e-2
+    max_iter = args.max_iter
+    save_iter_sep = args.save_iter_sep
+    power = 0.9
+    warmup_steps = args.warmup_steps
+    warmup_start_lr = 1e-5
 
 
 
