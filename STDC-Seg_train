@@ -445,30 +445,56 @@ lr_start：表示模型训练过程中的初始学习率，通常需要根据具
             
             
      ## train loop
+     
+     # 每隔多少次迭代输出一次日志信息
      msg_iter = 50
+     # 记录总体平均损失
      loss_avg = []
+     # 边界 BCE 损失
      loss_boundery_bce = []
+     # 边界 Dice 损失
      loss_boundery_dice = []
+     # 记录了整个训练开始的时间
      st = glob_st = time.time()
+     # 初始化一个数据集迭代器 diter
      diter = iter(dl)
+     # 记录当前的训练轮数
      epoch = 0
+     # 进行 max_iter 次迭代
      for it in range(max_iter):
+     # 尝试从数据集迭代器中获取一个 mini-batch 的数据，如果已达到数据集末尾，则更新 epoch，并重新初始化数据集迭代器
          try:
+             # 获取迭代器中下一个 mini-batch 的输入图像 im 和标签 lb
              im, lb = next(diter)
+             # 如果当前 mini-batch 中输入图像数量不足 n_img_per_gpu，则说明已经遍历完了整个数据集，此时抛出 StopIteration 异常
              if not im.size()[0]==n_img_per_gpu: raise StopIteration
+             # 异常，说明此轮完成，接着下一轮次
+             # 如果捕获到 StopIteration 异常，则说明已经遍历完了整个数据集，此时更新 epoch 计数器，并重新初始化数据集迭代器和采样器
          except StopIteration：
              epoch += 1
+             # 通过设置采样器的 epoch 属性来确保每个 epoch 中采样的顺序不同
              sampler.set_epoch(epoch)
+             # 重新初始化数据集迭代器
              diter = iter(dl)
+             # 继续获取下一个 mini-batch 的输入图像和标签
              im, lb = next(diter)
+             
+         # 将输入图像转移到 GPU 上进行计算
          im = im.cuda()
+         # 将标签信息转移到 GPU 上进行计算
          lb = lb.cuda()
+         # 获取输入图像的高度和宽度信息，第一个为通道数
          H, W = im.size()[2:]
+         # 去除标签张量的通道维度
          lb = torch.squeeze(lb, 1)
+"""
 
+"""
+         # 清除梯度  优化器会遍历所有已注册的模型参数，并将它们的梯度设置为 0。这样做的目的是为了防止当前梯度与上一次梯度累加而导致不正确的更新结果
          optim.zero_grad()
          
-         
+         # 是否使用尺度为 2、4 和 8 的特征图，如果使用，则将输入图像 im 输入到神经网络 net 中，并输出包括全分辨率预测 out、下采样 2 倍分辨率预测 out16、下采样 4 倍分辨率预测 out32、
+         # 尺度为 2 的细节图 detail2、尺度为 4 的细节图 detail4 和尺度为 8 的细节图 detail8
          if use_boundary_2 and use_boundary_4 and use_boundary_8:
              out, out16, out32, detail2, detail4, detail8 = net(im)
         
@@ -485,8 +511,90 @@ lr_start：表示模型训练过程中的初始学习率，通常需要根据具
          loss2 = criteria_16(out16, lb)
          loss3 = criteria_32(out32, lb)
         
+"""
+全分辨率预测 out 是指在原始分辨率上进行预测的结果，具有最高的空间分辨率；
+下采样 2 倍分辨率预测 out16 是指将输入图像下采样 2 倍后进行预测的结果，具有一定的空间信息损失；
+下采样 4 倍分辨率预测 out32 是指将输入图像下采样 4 倍后进行预测的结果，空间信息更少。
+而细节图则是指对应尺度下的细节增强信息，可以用于提高预测的精度和鲁棒性。
+
+通过多个尺度的特征图进行预测，可以有效地提高模型的性能和泛化能力，使其适用于不同尺寸和分辨率的输入图像。
+同时，在多尺度预测的过程中，可以利用不同分辨率下的细节信息进行特征增强和误差修复，从而提高模型对图像细节的感知能力。
+"""
+
          boundery_bce_loss = 0.
          boundery_dice_loss = 0.
+         
+         if use_boundary_2: 
+             # if dist.get_rank()==0:
+             #     print('use_boundary_2')
+             boundery_bce_loss2,  boundery_dice_loss2 = boundary_loss_func(detail2, lb)
+             boundery_bce_loss += boundery_bce_loss2
+             boundery_dice_loss += boundery_dice_loss2
+        
+         if use_boundary_4:
+              # if dist.get_rank()==0:
+              #     print('use_boundary_4')
+              boundery_bce_loss4,  boundery_dice_loss4 = boundary_loss_func(detail4, lb)
+              boundery_bce_loss += boundery_bce_loss4
+              boundery_dice_loss += boundery_dice_loss4
+
+         if use_boundary_8:
+              # if dist.get_rank()==0:
+              #     print('use_boundary_8')
+              boundery_bce_loss8,  boundery_dice_loss8 = boundary_loss_func(detail8, lb)
+              boundery_bce_loss += boundery_bce_loss8
+              boundery_dice_loss += boundery_dice_loss8
+              
+         loss = lossp + loss2 + loss3 + boundery_bce_loss + boundery_dice_loss
+         
+        # 反向传播计算梯度
+         loss.backward()
+         # 更新模型参数
+         optim.step()
+
+         loss_avg.append(loss.item())
+
+         loss_boundery_bce.append(boundery_bce_loss.item())
+         loss_boundery_dice.append(boundery_dice_loss.item())
+         
+         
+        ## print training log message
+        if (it+1)%msg_iter==0:
+            loss_avg = sum(loss_avg) / len(loss_avg)
+            lr = optim.lr
+            ed = time.time()
+            t_intv, glob_t_intv = ed - st, ed - glob_st
+            eta = int((max_iter - it) * (glob_t_intv / it))
+            eta = str(datetime.timedelta(seconds=eta))
+
+            loss_boundery_bce_avg = sum(loss_boundery_bce) / len(loss_boundery_bce)
+            loss_boundery_dice_avg = sum(loss_boundery_dice) / len(loss_boundery_dice)
+            msg = ', '.join([
+                'it: {it}/{max_it}',
+                'lr: {lr:4f}',
+                'loss: {loss:.4f}',
+                'boundery_bce_loss: {boundery_bce_loss:.4f}',
+                'boundery_dice_loss: {boundery_dice_loss:.4f}',
+                'eta: {eta}',
+                'time: {time:.4f}',
+            ]).format(
+                it = it+1,
+                max_it = max_iter,
+                lr = lr,
+                loss = loss_avg,
+                boundery_bce_loss = loss_boundery_bce_avg,
+                boundery_dice_loss = loss_boundery_dice_avg,
+                time = t_intv,
+                eta = eta
+            )
+            
+            logger.info(msg)
+            loss_avg = []
+            loss_boundery_bce = []
+            loss_boundery_dice = []
+            st = ed
+         
+         
 
 
 
