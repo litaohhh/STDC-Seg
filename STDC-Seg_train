@@ -633,6 +633,9 @@ lr_start：表示模型训练过程中的初始学习率，通常需要根据具
             save_pth = osp.join(save_pth_path, 'model_iter{}_mIOU50_{}_mIOU75_{}.pth'
             .format(it+1, str(round(mIOU50,4)), str(round(mIOU75,4))))
             
+            # 代码检查 net 是否具有 module 属性，如果有，则表示使用了多 GPU 训练，需要访问 net.module 的属性。
+            # 否则，直接访问 net 的属性。然后，将获得的状态字典保存到指定的文件路径 save_pth 中。
+            # 最后，仅在分布式训练中，进程等级为 0 的进程才会执行保存操作，避免多个进程同时写入同一个文件。
             state = net.module.state_dict() if hasattr(net, 'module') else net.state_dict()
             if dist.get_rank()==0: 
                 torch.save(state, save_pth)
@@ -652,20 +655,23 @@ lr_start：表示模型训练过程中的初始学习率，通常需要根据具
                 maxmIOU75 = mIOU75
                 save_pth = osp.join(save_pth_path, 'model_maxmIOU75.pth'.format(it+1))
                 state = net.module.state_dict() if hasattr(net, 'module') else net.state_dict()
-                if dist.get_rank()==0: torch.save(state, save_pth)
+                if dist.get_rank()==0: 
+                    torch.save(state, save_pth)
+                    
                 logger.info('max mIOU model saved to: {}'.format(save_pth))
             
             logger.info('mIOU50 is: {}, mIOU75 is: {}'.format(mIOU50, mIOU75))
             logger.info('maxmIOU50 is: {}, maxmIOU75 is: {}.'.format(maxmIOU50, maxmIOU75))
-
+            # 每次评估完后，保存参数，接下来一轮训练，
             net.train() 
-            
-            
+
     ## dump the final model
     save_pth = osp.join(save_pth_path, 'model_final.pth')
     net.cpu()
     state = net.module.state_dict() if hasattr(net, 'module') else net.state_dict()
-    if dist.get_rank()==0: torch.save(state, save_pth)
+    if dist.get_rank()==0: 
+        torch.save(state, save_pth)
+        
     logger.info('training done, model saved to: {}'.format(save_pth))
     print('epoch: ', epoch)
 
