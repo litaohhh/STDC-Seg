@@ -1,0 +1,329 @@
+#!/usr/bin/python
+# -*- encoding: utf-8 -*-
+
+from logger import setup_logger
+# 实现日志记录功能
+from models.model_stages import BiSeNet
+from cityscapes import CityScapes
+from loss.loss import OhemCELoss
+from loss.detail_loss import DetailAggregateLoss
+from evaluation import MscEvalV0
+# MscEvalV0 则是一个用于图像分割任务的评估类，可以帮助我们计算模型在测试集上的 IoU（Intersection-over-Union）指标等评价指标。
+from optimizer_loss import Optimizer
+
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader
+import torch.nn.functional as F
+
+import torch.distributed as dist
+# 用于支持分布式训练的模块。通过使用 torch.distributed 可以将深度学习模型训练分布式地运行在多个计算机或 GPU 上，从而加速训练过程和提高模型性能。
+"""
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.distributed as dist
+import torch.multiprocessing as mp
+
+# 定义模型
+class Net(nn.Module):
+    def __init__(self):
+        super(Net, self).__init__()
+        self.fc1 = nn.Linear(10, 100)
+        self.fc2 = nn.Linear(100, 2)
+
+    def forward(self, x):
+        x = torch.relu(self.fc1(x))
+        x = self.fc2(x)
+        return x
+
+# 定义训练函数
+def train(rank, world_size):
+    # 初始化进程组
+    dist.init_process_group("gloo", rank=rank, world_size=world_size)
+# 第一个参数指定进程组的后端类型，例如 "gloo" 表示使用 Gloo 后端，还可以选择使用 NCCL 或 MPI 等其他后端。
+# 第二个参数 rank 表示当前进程在进程组中的编号（从 0 开始），第三个参数 world_size 表示进程组中总共有多少个进程。
+    # 构建模型和优化器
+    model = Net()
+    optimizer = optim.SGD(model.parameters(), lr=0.01)
+
+    # 将模型复制到每个 GPU 上
+    model = nn.parallel.DistributedDataParallel(model, device_ids=[rank])
+
+    # 构造训练数据
+    data = torch.randn(64, 10).to(rank)
+
+    # 训练 100 轮
+    for epoch in range(100):
+        optimizer.zero_grad()
+        output = model(data)
+        loss = nn.functional.cross_entropy(output, torch.LongTensor([0, 1]).to(rank))
+        loss.backward()
+        optimizer.step()
+
+        if rank == 0 and epoch % 10 == 0:
+            print("Epoch {} loss: {:.4f}".format(epoch, loss.item()))
+
+    # 释放进程组资源
+    dist.destroy_process_group()
+
+if __name__ == "__main__":
+    # 启动 2 个进程并行训练
+    mp.spawn(train, args=(2,), nprocs=2, join=True)
+"""
+
+import os
+import os.path as osp
+import time
+import datetime
+import argparse  
+# 命令行参数解析模块，可以帮助我们更方便地处理命令行输入的参数
+# 可以定义程序需要接受哪些命令行参数，并指定它们的类型、默认值、描述等信息。它还可以自动生成帮助文档，提高了程序的可读性和易用性。
+"""
+import argparse
+
+# 定义命令行参数
+parser = argparse.ArgumentParser(description='This is a demo for argparse')
+parser.add_argument('--num', type=int, default=1, help='an integer to show how many times to print')
+
+# 解析命令行参数
+args = parser.parse_args()
+
+# 使用命令行参数
+for i in range(args.num):
+    print('Hello, world!')
+"""
+
+import logging
+# 创建 logger 对象
+# 通过 getLogger() 方法获取一个 logger 对象，然后可以使用该对象来记录日志信息。
+logger = logging.getLogger()
+"""
+import logging
+# 创建 logger 对象
+logger = logging.getLogger()
+# 配置 logger 对象，配置为记录 INFO 级别及以上的日志信息
+logger.setLevel(logging.INFO)
+
+# 创建控制台输出句柄
+console_handler = logging.StreamHandler()
+# 设置级别
+console_handler.setLevel(logging.INFO)
+# 设置输出格式
+console_formatter = logging.Formatter('[%(levelname)s] %(message)s')
+console_handler.setFormatter(console_formatter)
+
+# 添加控制台输出句柄到 logger 对象
+logger.addHandler(console_handler)
+# 记录日志信息
+logger.info('Hello, world!')
+"""
+
+# 布尔值判断
+def str2bool(v):
+    if v.lower() in ('yes', 'true', 't', 'y', '1'):
+        return True
+    elif v.lower() in ('no', 'false', 'f', 'n', '0'):
+        return False
+    else:
+        raise argparse.ArgumentTypeError('Unsupported value encountered.')
+
+# 定义添加参数
+def parse_args():
+    parse = argparse.ArgumentParser()
+    parse.add_argument(
+            '--local_rank',
+            dest = 'local_rank',
+            type = int,
+            default = -1,
+            )
+            # train个数8
+    parse.add_argument(
+            '--n_workers_train',
+            dest = 'n_workers_train',
+            type = int,
+            default = 8,
+            )
+            # val个数8
+    parse.add_argument(
+            '--n_workers_val',
+            dest = 'n_workers_val',
+            type = int,
+            default = 0,
+            )
+            # 每个gpu分8个图像
+    parse.add_argument(
+            '--n_img_per_gpu',
+            dest = 'n_img_per_gpu',
+            type = int,
+            default = 16,
+            )
+    parse.add_argument(
+            '--max_iter',
+            dest = 'max_iter',
+            type = int,
+            default = 40000,
+            )
+    parse.add_argument(
+            '--save_iter_sep',
+            dest = 'save_iter_sep',
+            type = int,
+            default = 1000,
+            )
+    parse.add_argument(
+            '--warmup_steps',
+            dest = 'warmup_steps',
+            type = int,
+            default = 1000,
+            )      
+    parse.add_argument(
+            '--mode',
+            dest = 'mode',
+            type = str,
+            default = 'train',
+            )
+    parse.add_argument(
+            '--ckpt',
+            dest = 'ckpt',
+            type = str,
+            default = None,
+            )
+    parse.add_argument(
+            '--respath',
+            dest = 'respath',
+            type = str,
+            default = None,
+            )
+    parse.add_argument(
+            '--backbone',
+            dest = 'backbone',
+            type = str,
+            default = 'CatNetSmall',
+            )
+    parse.add_argument(
+            '--pretrain_path',
+            dest = 'pretrain_path',
+            type = str,
+            default = '',
+            )
+    parse.add_argument(
+            '--use_conv_last',
+            dest = 'use_conv_last',
+            type = str2bool,
+            default = False,
+            )
+    parse.add_argument(
+            '--use_boundary_2',
+            dest = 'use_boundary_2',
+            type = str2bool,
+            default = False,
+            )
+    parse.add_argument(
+            '--use_boundary_4',
+            dest = 'use_boundary_4',
+            type = str2bool,
+            default = False,
+            )
+    parse.add_argument(
+            '--use_boundary_8',
+            dest = 'use_boundary_8',
+            type = str2bool,
+            default = False,
+            )
+    parse.add_argument(
+            '--use_boundary_16',
+            dest = 'use_boundary_16',
+            type = str2bool,
+            default = False,
+            )
+    return parse.parse_args()
+
+# 训练
+def train():
+    args = parse_args()
+    # 设置参数保存路径
+    save_pth_path = os.path.join(args.respath, 'pths')
+    dspth = './data'
+    
+    # print(save_pth_path)
+    # print(osp.exists(save_pth_path))
+    # if not osp.exists(save_pth_path) and dist.get_rank()==0: 
+    # 如果没有save_pth_path文件，创建一个这样的文件夹
+    if not osp.exists(save_pth_path):
+        os.makedirs(save_pth_path)
+        
+        
+        torch.cuda.set_device(args.local_rank)
+        # 初始化进程组
+        dist.init_process_group(
+                backend = 'nccl',
+                init_method = 'tcp://127.0.0.1:33274',
+                world_size = torch.cuda.device_count(),
+                # 进程数等于cuda设备数量
+                rank=args.local_rank
+                # 在实际运行中，通常需要通过命令行参数来指定当前进程的编号
+                )
+               # backend = 'nccl'：指定了后端类型为 NCCL，即使用 NVIDIA 提供的用于 GPU 间通信的库进行分布式训练。
+               # init_method = 'tcp://127.0.0.1:33274'：指定了初始化方法为 TCP，使用指定的 IP 地址和端口号与其他进程建立连接。这里的 IP 地址和端口号需要根据实际情况设置。
+               # world_size = torch.cuda.device_count()：指定了进程组的总大小为当前 CUDA 设备的数量，即每个设备对应一个进程。
+               # rank=args.local_rank：指定当前进程在进程组中的编号，该值从命令行参数 --local_rank 中获取。
+  # 第一个参数指定进程组的后端类型，例如 "gloo" 表示使用 Gloo 后端，还可以选择使用 NCCL 或 MPI 等其他后端。
+  # 第二个参数 rank 表示当前进程在进程组中的编号（从 0 开始），第三个参数 world_size 表示进程组中总共有多少个进程。                
+  
+        setup_logger(args.respath)
+        
+        ## dataset
+        # 19个类别
+        n_classes = 19
+        n_img_per_gpu = args.n_img_per_gpu
+        n_workers_train = args.n_workers_train
+        n_workers_val = args.n_workers_val
+        use_boundary_16 = args.use_boundary_16
+        se_boundary_8 = args.use_boundary_8
+        use_boundary_4 = args.use_boundary_4
+        use_boundary_2 = args.use_boundary_2
+    
+        mode = args.mode
+        cropsize = [1024, 512]
+        randomscale = (0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0, 1.125, 1.25, 1.375, 1.5)
+                
+   
+    if dist.get_rank()==0: 
+        logger.info('n_workers_train: {}'.format(n_workers_train))
+        logger.info('n_workers_val: {}'.format(n_workers_val))
+        logger.info('use_boundary_2: {}'.format(use_boundary_2))
+        logger.info('use_boundary_4: {}'.format(use_boundary_4))
+        logger.info('use_boundary_8: {}'.format(use_boundary_8))
+        logger.info('use_boundary_16: {}'.format(use_boundary_16))
+        logger.info('mode: {}'.format(args.mode))             
+               
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
