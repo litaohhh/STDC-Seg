@@ -327,7 +327,8 @@ def train():
                     drop_last = True)
     # pin_memory：表示是否将内存锁定到 RAM 中。如果为 True，则会将数据从主机端内存锁定到 RAM 中，可以加速数据传输，但会占用更多的系统内存；
     # drop_last：表示是否丢弃最后一组大小小于 batch_size 的数据，如果为 True，则表示最后一组大小小于 batch_size 的数据不进行训练，否则会进行处理。
-    #  shuffle 参数表示是否对数据集进行随机打乱。如果该参数为 True，则在每个 epoch 开始时，数据加载器会将数据集中的所有样本打乱重新排列；如果该参数为 False，则不对数据集进行打乱操作，按照原始顺序进行训练。
+    # shuffle 参数表示是否对数据集进行随机打乱。如果该参数为 True，则在每个 epoch 开始时，数据加载器会将数据集中的所有样本打乱重新排列；
+    # 如果该参数为 False，则不对数据集进行打乱操作，按照原始顺序进行训练。
     # 一般来说，在训练过程中对数据进行随机打乱可以增加模型的鲁棒性和泛化能力，避免网络过度拟合训练数据，提高网络的训练效果。但是，对于某些特定的任务或数据集，也可能需要保持数据集的原始顺序进行训练
     
                     
@@ -345,6 +346,8 @@ def train():
     
     
     ## model
+    
+    # 忽略指定的标签类别
     ignore_idx = 255
     net = BiSeNet(backbone=args.backbone, n_classes=n_classes, pretrain_model=args.pretrain_path, 
     use_boundary_2=use_boundary_2, use_boundary_4=use_boundary_4, use_boundary_8=use_boundary_8, 
@@ -373,7 +376,7 @@ def train():
          
     # 分数阈值
     score_thres = 0.7
-    # 最小个数为  每个gpu上的图象数量 * 图像裁剪后的长 * 图像裁剪后的宽  除以16
+    # 最小保留样本数的阈值为  每个gpu上的图象数量 * 图像裁剪后的长 * 图像裁剪后的宽  除以16
     n_min = n_img_per_gpu * cropsize[0] * cropsize[1]//16
     
     # 创建三个损失函数对象，分别用于计算图像语义分割任务中的不同尺度下的损失值
@@ -386,27 +389,104 @@ def train():
     # ignore_lb 参数：表示忽略掉某些指定的标签类别，不参与损失值的计算；
     # criteria_p、criteria_16 和 criteria_32：是三个不同尺度下的损失函数对象，分别对应着全分辨率（full resolution）、1/16 分辨率和 1/32 分辨率下的损失值计算。
     
+    # 创建一个自定义的损失函数对象 boundary_loss_func，该损失函数主要用于计算图像分割任务中的边界细节损失值。
+    # DetailAggregateLoss：是一个自定义的 PyTorch 损失函数类，用于计算图像分割任务中的边界细节损失值。该函数的具体实现方式可以根据需求进行修改；
+    # boundary_loss_func：表示用于计算边界细节损失值的损失函数对象，可以通过调用 DetailAggregateLoss 类的构造方法来创建。
     boundary_loss_func = DetailAggregateLoss()
     
     ## optimizer
+    
+    # maxmIOU50 和 maxmIOU75：分别表示训练过程中 IoU 指标达到 50% 和 75% 时的最大值，用于记录模型在验证集上的最佳表现；
     maxmIOU50 = 0.
     maxmIOU75 = 0.
+    # momentum：表示动量（momentum）系数，用于控制梯度更新的速度和方向。在优化器的 SGD 更新过程中，会将之前的梯度信息融入到当前梯度中，加速收敛并减少震荡；
     momentum = 0.9
+    # weight_decay：表示权重衰减（weight decay）系数，用于控制网络权重的正则化强度。通过惩罚较大的权重，可以防止网络过度拟合训练数据。
     weight_decay = 5e-4
+    # 初始学习率，以便在训练初期能够快速收敛，并逐渐降低学习率以防止过度拟合，
+    # 较大的初始学习率可以加快模型的收敛速度，但也可能导致模型无法收敛或震荡不定；较小的初始学习率则会减缓训练速度，但更容易保证模型收敛稳定
     lr_start = 1e-2
+    # max_iter：表示模型最大训练迭代次数；40000
     max_iter = args.max_iter
+    # save_iter_sep：表示每隔多少个 mini-batch 保存一次模型参数；1000
     save_iter_sep = args.save_iter_sep
+    # power：表示学习率调度策略中的指数衰减系数，用于控制学习率的衰减速率
     power = 0.9
+    # warmup_steps：表示模型开始训练时的预热步数，即在预热阶段内逐渐增加学习率，以便尽快达到较高的训练效果 1000
     warmup_steps = args.warmup_steps
+    # warmup_start_lr：表示模型开始训练时的初始学习率，用于控制预热阶段学习率的大小。
     warmup_start_lr = 1e-5
+"""
+warmup_start_lr：表示模型开始训练时的预热阶段的初始学习率，该阶段的目的通常是为了快速收敛，并尽快达到较高的训练效果。
+在预热阶段内，学习率通常设置得比较小，以便在这个阶段内探索数据集的特征，并减少因学习率设置不当而导致的震荡和不稳定性。
+lr_start：表示模型训练过程中的初始学习率，通常需要根据具体任务和网络结构进行调整。
+在训练初期，较大的初始学习率可以加快模型的收敛速度，同时也可能导致模型无法收敛或震荡不定；较小的初始学习率则会减缓训练速度，但更容易保证模型收敛稳定。
 
+线性增加：学习率可以按照线性函数进行增加，例如初始学习率为 1e-5，每个 mini-batch 增加 1e-5，直到达到预设的最大值。
+指数增加：学习率可以按照指数函数进行增加，例如初始学习率为 1e-5，每个 mini-batch 增加指数函数（如 ）的结果，直到达到预设的最大值。
+多项式函数增加：学习率可以按照多项式函数进行增加，例如初始学习率为 1e-5，每个 mini-batch 增加多项式函数的结果（如 ），直到达到预设的最大值。
+"""
 
+     if dist.get_rank()==0: 
+        print('max_iter: ', max_iter)
+        print('save_iter_sep: ', save_iter_sep)
+        print('warmup_steps: ', warmup_steps)
+        
+     optim = Optimizer(
+            model = net.module,
+            loss = boundary_loss_func,
+            lr0 = lr_start,
+            momentum = momentum,
+            wd = weight_decay,
+            warmup_steps = warmup_steps,
+            warmup_start_lr = warmup_start_lr,
+            max_iter = max_iter,
+            power = power)
+            
+            
+     ## train loop
+     msg_iter = 50
+     loss_avg = []
+     loss_boundery_bce = []
+     loss_boundery_dice = []
+     st = glob_st = time.time()
+     diter = iter(dl)
+     epoch = 0
+     for it in range(max_iter):
+         try:
+             im, lb = next(diter)
+             if not im.size()[0]==n_img_per_gpu: raise StopIteration
+         except StopIteration：
+             epoch += 1
+             sampler.set_epoch(epoch)
+             diter = iter(dl)
+             im, lb = next(diter)
+         im = im.cuda()
+         lb = lb.cuda()
+         H, W = im.size()[2:]
+         lb = torch.squeeze(lb, 1)
 
+         optim.zero_grad()
+         
+         
+         if use_boundary_2 and use_boundary_4 and use_boundary_8:
+             out, out16, out32, detail2, detail4, detail8 = net(im)
+        
+         if (not use_boundary_2) and use_boundary_4 and use_boundary_8:
+             out, out16, out32, detail4, detail8 = net(im)
 
+         if (not use_boundary_2) and (not use_boundary_4) and use_boundary_8:
+             out, out16, out32, detail8 = net(im)
 
+         if (not use_boundary_2) and (not use_boundary_4) and (not use_boundary_8):
+             out, out16, out32 = net(im)
 
-
-
+         lossp = criteria_p(out, lb)
+         loss2 = criteria_16(out16, lb)
+         loss3 = criteria_32(out32, lb)
+        
+         boundery_bce_loss = 0.
+         boundery_dice_loss = 0.
 
 
 
